@@ -15,7 +15,7 @@ class TreeNode:
         self.best_lambda = best_lambda 
 
 class DecisionTree:
-    def __init__(self, max_depth=5, min_instance_ratio=0.01, candidate_lambdas=[0.1, 0.8]):
+    def __init__(self, max_depth=5, min_instance_ratio=0.01, candidate_lambdas = np.logspace(-2, 0, num=10, base=10.0)):
         self.max_depth = max_depth
         self.min_instance_ratio = min_instance_ratio
         self.candidate_lambdas = candidate_lambdas
@@ -32,6 +32,8 @@ class DecisionTree:
     def purity_measure(self, S):
         total_instances = len(S)
         class_counts = S.value_counts()
+        if total_instances == 0:
+            return 0
         return sum((class_counts/total_instances) ** 2)
 
     # Define the splitting criterion based on purity measure and lambda parameter
@@ -53,40 +55,60 @@ class DecisionTree:
         best_split_point = None
         best_split_point_star = None
         best_score = -float('inf')
+        
+        prev_score = None
+        prev_drop = None
         i = 0
-        prev_drop = 0
+
         # iterate through candidate lambda values
         for lambda_val in self.candidate_lambdas:
+            best_split_point = None
+            current_best_score = -float('inf')
+
             # iterate through all columns
             for col in X.columns:
-                unique_values = X[col].unique()
+                #unique_values = X[col].unique()
+                values = np.sort(X[col].unique())
+                thresholds = (values[:-1] + values[1:]) / 2 # midpoints
                 # test all unique values in the current column
-                for split_point in unique_values:
+                
+                for split_point in thresholds:
                     Sl_v = y[X[col] <= split_point]
                     Sr_v = y[X[col] > split_point]
+                
+                    if len(Sl_v) == 0 or len(Sr_v) == 0:
+                        continue # Skip invalit split
                     # Calculate the split score for this col and threshold and lambda
+                
                     score = self.splitting_criterion(y, Sl_v, Sr_v, lambda_val)
                     # if the score is better than the best score so far, assign the current score to best score
-                    if score > best_score:
-                        best_score = score
-                        best_lambda = lambda_val
+                    if score > current_best_score:
+                        current_best_score = score
                         best_split_point = (col, split_point)
+                        #best_lambda = lambda_val
+
+            # Evaluate Drop behavior
             # if it is the first column assing current scores to best score  
             if i == 0:
-                prev_score = best_score
-                lambda_star = best_lambda
+                prev_score = current_best_score
+                lambda_star = lambda_val
                 best_split_point_star = best_split_point 
                 continue
-            # Calculate the score change    
-            drop = prev_score - best_score
-            # if the score change is bigger than previous one assign current scores to best score
-            if drop > prev_drop:
-                lambda_star = best_lambda
-                best_split_point_star = best_split_point 
-                prev_score = best_score
-                prev_drop = drop
+            elif i == 1:
+                drop_1 = prev_score - current_best_score
+                prev_score = current_best_score
+                lambda_star = lambda_val
+                best_split_point_star = best_split_point
             else:
-                break
+                drop_2 = prev_score - current_best_score
+                if drop_2 < drop_1: # drop decreased -> stop
+                    break
+                else:
+                    drop_1 = drop_2
+                    prev_score = current_best_score
+                    lambda_star = lambda_val
+                    best_split_point_star = best_split_point
+            i += 1
         return lambda_star, best_split_point_star
 
     def majority_class(self, y):
