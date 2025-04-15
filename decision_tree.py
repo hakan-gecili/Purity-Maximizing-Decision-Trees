@@ -208,7 +208,33 @@ class DecisionTree:
 
         return metrics_df
 
-    def extract_rules(self, node=None, path=None, rules=None):
+    def extract_rules(self, node=None, path=None, rules=None, target_class=1):
+        if rules is None:
+            rules = []
+        if path is None:
+            path = []
+
+        if node is None:
+            node = self.root
+
+        if node.value is not None:
+            if node.value == target_class:
+                rules.append(path[:])  # Save a copy of the path
+            return rules
+
+        # Go left (feature <= threshold)
+        self.extract_rules(node.left,
+                        path + [(node.feature, "<=", node.threshold)],
+                        rules, target_class)
+
+        # Go right (feature > threshold)
+        self.extract_rules(node.right,
+                        path + [(node.feature, ">", node.threshold)],
+                        rules, target_class)
+
+        return rules
+    
+    def extract_rules_in_readable_format(self, node=None, path=None, rules=None):
         if node is None:
             node = self.root
         if path is None:
@@ -258,3 +284,75 @@ class DecisionTree:
             graph.edge(node_id, right_id, label="N")
         
         return node_id  # Return the node ID for recursive linking
+
+    def evaluate_rule(self, rule, X, y, target_class=1):
+        mask = pd.Series([True] * len(X), index=X.index)
+
+        for feature, op, threshold in rule:
+            if op == "<=":
+                mask &= X[feature] <= threshold
+            else:
+                mask &= X[feature] > threshold
+
+        covered = y[mask]
+        if len(covered) == 0:
+            return 0, 0
+
+        coverage = len(covered)
+        confidence = sum(covered == target_class) / coverage
+        return coverage, confidence
+    
+    def filter_rules(self, rules, X, y, target_class=1, min_coverage=5, min_confidence=0.8):
+        # Filter the Rules (Based on Thresholds) that are
+        # too specific (low coverage), or  too noisy (low confidence).
+        filtered_rules = []
+        for rule in rules:
+            coverage, confidence = self.evaluate_rule(rule, X, y, target_class)
+            if coverage >= min_coverage and confidence >= min_confidence:
+                filtered_rules.append((rule, coverage, confidence))
+        return filtered_rules
+
+    def generate_homogeneity_conditions(self, node):
+        """
+        Generate a single rule by traversing only the right (>) branch 
+        starting from the given node, connecting conditions with AND logic.
+        """
+        conditions = []
+        current_node = node
+
+        # Traverse the tree following the right branch only
+        while current_node.right is not None:
+            condition = f"({current_node.feature} > {current_node.threshold})"
+            conditions.append(condition)
+            current_node = current_node.right  # follow right (>) branch
+
+        # Once at leaf, append the class prediction
+        rule = " AND ".join(conditions)
+        rule += f" --> Class {current_node.value}"
+
+        return rule
+    
+    def extract_homogenity_and_complementary_rules(self, current_node, homogeneity_rules=None, complementary_rules=None):
+        """
+        Recursive extraction of R and R_hat rules:
+        - At each recursion, generates a rule by traversing the right (>) branches.
+        - Stores left-side conditions as complementary conditions (< conditions).
+        """
+        if homogeneity_rules is None:
+            homogeneity_rules = []
+        if complementary_rules is None:
+            complementary_rules = []
+
+        # Generate and append the right-branch rule
+        rule = self.generate_homogeneity_conditions(current_node)
+        homogeneity_rules.append(rule)
+
+        # If left child exists, store the complementary condition and recurse left
+        if current_node.left is not None:
+            condition = f"(Feature {current_node.feature} < {current_node.threshold})"
+            complementary_rules.append(condition)
+
+            # Recursive call on left subtree
+            self.extract_homogenity_and_complementary_rules(current_node.left, homogeneity_rules, complementary_rules)
+
+        return homogeneity_rules, complementary_rules
