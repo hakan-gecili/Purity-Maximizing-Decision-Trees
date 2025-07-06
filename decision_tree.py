@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score, matthews_corrcoef,
                              cohen_kappa_score, precision_recall_curve, auc, roc_curve)
+from scipy.stats import norm
 import matplotlib.pyplot as plt 
 from graphviz import Digraph
 
@@ -70,6 +71,7 @@ class DecisionTree:
                 #unique_values = X[col].unique()
                 values = np.sort(X[col].unique())
                 thresholds = (values[:-1] + values[1:]) / 2 # midpoints
+                thresholds = [round(threshold,4) for threshold in thresholds] # Round floating numbers to 4th significant digit
                 # test all unique values in the current column
                 
                 for split_point in thresholds:
@@ -115,6 +117,26 @@ class DecisionTree:
         """Returns the most common class in y"""
         return np.bincount(y).argmax()
 
+    def get_max_side_from_current_node(self, X, y, depth):
+        """Recursive function to construct one side (max side) of the decision tree"""
+        if len(set(y)) == 1 or depth > self.max_depth or len(y) == 0:
+            return TreeNode(value = self.majority_class(y) if len(y) > 0 else 0)
+        
+        best_lambda, (feature, threshold) = self.find_split_point(X, y)
+        print(f"best_lambda: {best_lambda}, feature: {feature}, threshold: {threshold} Depth: {depth}")
+
+        if feature is None:
+            return TreeNode(value = self.majority_class(y))
+
+        right_mask = X[feature] > threshold
+
+        if sum(right_mask) == 0 or (len(right_mask) / self.total_observations < self.min_instance_ratio):
+            return TreeNode(value = self.majority_class(y))
+        else:
+            right_subtree = self.get_max_side_from_current_node(X[right_mask], y[right_mask], depth+1)
+        
+        return TreeNode(feature, threshold, TreeNode(value = self.majority_class(y)), right_subtree, best_lambda)
+
     def build_tree (self, X, y, depth = 0):
         """Recursive function to construct the decision tree"""
         if len(set(y)) == 1 or depth > self.max_depth or len(y) == 0:
@@ -137,7 +159,7 @@ class DecisionTree:
         if sum(right_mask) == 0 or (len(right_mask) / self.total_observations < self.min_instance_ratio):
             return TreeNode(value = self.majority_class(y))
         else:
-            right_subtree = self.build_tree(X[right_mask], y[right_mask], depth+1)
+            right_subtree = self.get_max_side_from_current_node(X[right_mask], y[right_mask], depth+1)
         
         return TreeNode(feature, threshold, left_subtree, right_subtree, best_lambda)
 
@@ -328,9 +350,8 @@ class DecisionTree:
 
         # Once at leaf, append the class prediction
         rule = " AND ".join(conditions)
-        rule += f" --> Class {current_node.value}"
 
-        return rule
+        return {'rule':rule, 'class': current_node.value}
     
     def extract_homogenity_and_complementary_rules(self, current_node, homogeneity_rules=None, complementary_rules=None):
         """
@@ -349,10 +370,88 @@ class DecisionTree:
 
         # If left child exists, store the complementary condition and recurse left
         if current_node.left is not None:
-            condition = f"(Feature {current_node.feature} < {current_node.threshold})"
+            condition = f"({current_node.feature} <= {current_node.threshold})"
             complementary_rules.append(condition)
 
             # Recursive call on left subtree
             self.extract_homogenity_and_complementary_rules(current_node.left, homogeneity_rules, complementary_rules)
 
         return homogeneity_rules, complementary_rules
+
+    def apply_rule_to_data(self, rule_str, X):
+        """Apply a rule string like '(Feature 2 ≥ 3.5) AND (Feature 4 < 1.2)' to DataFrame X and return boolean mask"""
+        mask = np.ones(len(X), dtype=bool)
+        for condition in rule_str.split("AND"):
+            #condition = condition.strip("() ").replace("Feature", "X.iloc[:,")
+            #condition = condition.replace("≥", "] >= ").replace("<", "] < ")
+            condition = condition.strip("() ")
+            condition = condition.replace("≥", " >= ")
+            if len(condition) > 0:
+                mask = X.eval(condition)
+        return mask
+
+    def safe_concise_rule_pruning(self, homogeneity_rules, complementary_rules, X, y, alpha=0.05):
+        """
+        Implements Algorithm 2: Concise Rule Pruning with safe handling for p_full = 1.0 or 0.0.
+        """
+        z_alpha = norm.ppf(1 - alpha)
+        concise_rules = []
+
+        for i in range(len(homogeneity_rules) - 1, 0, -1):
+            R_i = homogeneity_rules[i]['rule']
+            if len(R_i) == 0:
+                    continue
+            
+            complement_up_to_i = complementary_rules[:i]
+            full_rule_chain = complement_up_to_i + [R_i]
+            full_rule_str = " AND ".join(full_rule_chain)
+
+            mask_full = self.apply_rule_to_data(full_rule_str, X)
+            y_full = y[mask_full]
+            if len(y_full) == 0:
+                print("Empty mask for full rule, skipping")
+                continue
+            
+            y0 = y_full.mode()[0]
+            p_full = np.mean(y_full == y0)
+            n = len(y_full)
+
+            # Handle edge case: perfect purity → don't prune
+            if p_full == 1.0 or p_full == 0.0:
+                concise_rules.append({"rule" : full_rule_str, "class": y0})
+                continue
+
+            # Test if R_i alone is enough
+            mask_Ri = self.apply_rule_to_data(R_i, X)            
+            y_Ri = y[mask_Ri]
+            if len(y_Ri) > 0:
+                p_Ri = np.mean(y_Ri == y0)
+                denom = np.sqrt(max(p_full * (1 - p_full), 1e-10) / n)
+                z = (p_Ri - p_full) / denom
+                if z > -z_alpha:
+                    concise_rules.append({"rule": R_i, "class": y0})
+                    continue
+            
+            # Try combinations: R_bar_1...R_bar_j AND R_i
+            found = False
+            for j in range(1, i):
+                partial_rule_chain = complementary_rules[:j] + [R_i]
+                partial_rule_str = " AND ".join(partial_rule_chain)
+                mask_partial = self.apply_rule_to_data(partial_rule_str, X)
+                y_partial = y[mask_partial]
+                if len(y_partial) == 0:
+                    print(f" {j} Go to Next")
+                p_partial = np.mean(y_partial == y0)
+                denom = np.sqrt(max(p_full * (1 - p_full), 1e-10) / n)
+                z = (p_partial - p_full) / denom
+                if z > -z_alpha:
+                    concise_rules.append({"rule" : partial_rule_str, "class": y0})
+                    found = True
+                    print("Found")
+                    
+            if not found:
+                concise_rules.append({"rule": full_rule_str, "class": y0})
+        if len(homogeneity_rules[0]['rule']) > 0 :
+            concise_rules.append({"rule": homogeneity_rules[0]['rule'], "class": homogeneity_rules[0]['class']})
+        
+        return concise_rules[::-1]  # reverse to original order
