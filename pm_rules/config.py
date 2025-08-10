@@ -1,0 +1,12 @@
+"""Configuration constants for rule extraction and evaluation."""
+
+TOP_K_FEATURES_PER_INSTANCE = 3
+MIN_SUPPORT = 15
+MIN_PRECISION = 0.90
+MIN_RECALL = 0.15
+MIN_F1 = 0.50
+POS_LABEL = 1
+RANDOM_STATE = 42
+TEST_SIZE = 0.25
+VAL_SIZE = 0.25
+PLOT_RULE_PERFORMANCE = False
